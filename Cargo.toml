@@ -12,6 +12,7 @@ tokio = { version = "1", features = ["net", "io-util", "macros", "rt-multi-threa
 # Keep the default backend (aws-lc-rs): it offers the post-quantum key exchange X25519MLKEM768, the "ring" feature does not.
 rustls = "0.23"
 webpki-roots = "1.0"
+tokio-rustls = "0.26"
 
 # Command-line argument parsing
 clap = { version = "4", features = ["derive"] }

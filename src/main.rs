@@ -1,7 +1,6 @@
 //! Post-Quantum VPN Client
 //!
-//! Skeleton: it checks its arguments and builds the TLS client configuration,
-//! then stops with an error. No tunnel is started yet (see `README.md`).
+//! Establishes a strictly hybrid TLS connection. IP tunneling is not yet implemented.
 //!
 //! Post-quantum security comes from TLS 1.3 itself: the default rustls backend
 //! offers the hybrid key exchange X25519MLKEM768 (X25519 + ML-KEM-768) first.
@@ -14,18 +13,20 @@
 //! vpn-client --port 1080 --server-domain vpn.example.com --server-cert server.pem
 //! ```
 
+mod transport;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use rustls::{
-    ClientConfig, RootCertStore,
+    RootCertStore,
     pki_types::{CertificateDer, ServerName, pem::PemObject},
 };
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-/// Post-quantum VPN client (skeleton: no tunnel is started yet)
+/// Post-quantum TLS client (IP tunneling is not yet implemented)
 #[derive(Parser, Debug)]
 struct CliArgs {
     /// SOCKS5 proxy port to listen on for incoming connections.
@@ -62,7 +63,9 @@ fn load_roots(server_cert: Option<&Path>) -> Result<RootCertStore> {
             info!("Loading custom server certificate: {:?}", path);
             let reading = || format!("reading {}", path.display());
             for cert in CertificateDer::pem_file_iter(path).with_context(reading)? {
-                roots.add(cert.with_context(reading)?).with_context(reading)?;
+                roots
+                    .add(cert.with_context(reading)?)
+                    .with_context(reading)?;
             }
             if roots.is_empty() {
                 bail!("no certificate found in {}", path.display());
@@ -83,14 +86,18 @@ async fn main() -> Result<()> {
     let args = CliArgs::parse();
 
     info!("Initializing Post-Quantum VPN Client");
-    info!("Target server: {}:{}", args.server_domain.to_str(), args.server_port);
+    info!(
+        "Target server: {}:{}",
+        args.server_domain.to_str(),
+        args.server_port
+    );
     info!("SOCKS5 proxy port: {}", args.port);
 
-    let _config = ClientConfig::builder()
-        .with_root_certificates(load_roots(args.server_cert.as_deref())?)
-        .with_no_client_auth();
-
-    bail!("not implemented: no tunnel is started yet")
+    let config = transport::client_config(load_roots(args.server_cert.as_deref())?)?;
+    let stream = transport::connect(args.server_domain, args.server_port, config).await?;
+    let session = stream.get_ref().1;
+    info!(version = ?session.protocol_version(), group = ?session.negotiated_key_exchange_group().map(|g| g.name()), "Hybrid TLS connection established; IP tunneling is not yet implemented");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -99,9 +106,7 @@ mod tests {
 
     #[test]
     fn post_quantum_key_exchange_is_offered_first() {
-        let config = ClientConfig::builder()
-            .with_root_certificates(RootCertStore::empty())
-            .with_no_client_auth();
+        let config = transport::client_config(RootCertStore::empty()).unwrap();
         assert_eq!(
             config.crypto_provider().kx_groups[0].name(),
             rustls::NamedGroup::X25519MLKEM768
@@ -111,7 +116,12 @@ mod tests {
     #[test]
     fn server_cert_replaces_the_public_roots() {
         let two_certs: String = ["a.test", "b.test"]
-            .map(|name| rcgen::generate_simple_self_signed([name.to_owned()]).unwrap().cert.pem())
+            .map(|name| {
+                rcgen::generate_simple_self_signed([name.to_owned()])
+                    .unwrap()
+                    .cert
+                    .pem()
+            })
             .concat();
         let path = std::env::temp_dir().join(format!("vpn-client-test-{}.pem", std::process::id()));
         std::fs::write(&path, two_certs).unwrap();
@@ -119,7 +129,10 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
 
         assert_eq!(roots.unwrap().len(), 2);
-        assert_eq!(load_roots(None).unwrap().len(), webpki_roots::TLS_SERVER_ROOTS.len());
+        assert_eq!(
+            load_roots(None).unwrap().len(),
+            webpki_roots::TLS_SERVER_ROOTS.len()
+        );
         // A file without any certificate is an error, not an empty trust list.
         assert!(load_roots(Some(Path::new("Cargo.toml"))).is_err());
     }
